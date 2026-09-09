@@ -7,16 +7,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .correlation import EventCorrelator
+from .storage import init_db, persisted_count, recent_events, save_event
+from .urban_health import summarize_city
 
 app = FastAPI(
     title="SIH26124 Urban Intelligence API",
     description="Central event-ingestion API for AI-enabled public transport sensing nodes.",
-    version="0.2.0",
+    version="0.3.0",
 )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -53,6 +56,7 @@ class UrbanEvent(UrbanEventIn):
 
 EVENTS: list[UrbanEvent] = []
 CORRELATOR = EventCorrelator(radius_m=25.0)
+init_db()
 
 
 @app.get("/")
@@ -62,7 +66,8 @@ def health() -> dict:
         "status": "online",
         "service": "central-event-api",
         "version": app.version,
-        "events_received": len(EVENTS),
+        "events_received_this_process": len(EVENTS),
+        "persisted_events": persisted_count(),
         "correlated_issues": len(CORRELATOR.issues),
     }
 
@@ -76,6 +81,7 @@ def ingest_event(payload: UrbanEventIn) -> UrbanEvent:
     )
     EVENTS.append(event)
     CORRELATOR.observe(event)
+    save_event(event)
     return event
 
 
@@ -83,6 +89,11 @@ def ingest_event(payload: UrbanEventIn) -> UrbanEvent:
 def list_events(limit: int = 100) -> list[UrbanEvent]:
     safe_limit = min(max(limit, 1), 1000)
     return EVENTS[-safe_limit:]
+
+
+@app.get("/api/v1/history")
+def persisted_history(limit: int = 100) -> list[dict]:
+    return recent_events(limit)
 
 
 @app.get("/api/v1/issues")
@@ -102,6 +113,11 @@ def list_correlated_issues() -> list[dict]:
     ]
 
 
+@app.get("/api/v1/analytics/urban-health")
+def urban_health() -> dict:
+    return summarize_city(EVENTS, CORRELATOR.issues)
+
+
 @app.get("/api/v1/stats")
 def stats() -> dict:
     counts: dict[str, int] = {}
@@ -111,6 +127,7 @@ def stats() -> dict:
         buses.add(event.bus_id)
     return {
         "total_events": len(EVENTS),
+        "persisted_events": persisted_count(),
         "correlated_issues": len(CORRELATOR.issues),
         "active_bus_ids": sorted(buses),
         "by_type": counts,
