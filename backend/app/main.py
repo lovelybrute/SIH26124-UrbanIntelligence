@@ -5,21 +5,17 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+from .correlation import EventCorrelator
+
 app = FastAPI(
     title="SIH26124 Urban Intelligence API",
     description="Central event-ingestion API for AI-enabled public transport sensing nodes.",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 EventType = Literal[
-    "pothole",
-    "road_damage",
-    "waterlogging",
-    "road_infrastructure",
-    "traffic_congestion",
-    "pedestrian_risk",
-    "vehicle_incident",
-    "number_plate",
+    "pothole", "road_damage", "waterlogging", "road_infrastructure",
+    "traffic_congestion", "pedestrian_risk", "vehicle_incident", "number_plate",
 ]
 
 
@@ -48,6 +44,7 @@ class UrbanEvent(UrbanEventIn):
 
 
 EVENTS: list[UrbanEvent] = []
+CORRELATOR = EventCorrelator(radius_m=25.0)
 
 
 @app.get("/")
@@ -56,7 +53,9 @@ def health() -> dict:
         "project": "SIH26124 Urban Intelligence",
         "status": "online",
         "service": "central-event-api",
+        "version": app.version,
         "events_received": len(EVENTS),
+        "correlated_issues": len(CORRELATOR.issues),
     }
 
 
@@ -68,6 +67,7 @@ def ingest_event(payload: UrbanEventIn) -> UrbanEvent:
         received_at=datetime.now(timezone.utc),
     )
     EVENTS.append(event)
+    CORRELATOR.observe(event)
     return event
 
 
@@ -77,9 +77,33 @@ def list_events(limit: int = 100) -> list[UrbanEvent]:
     return EVENTS[-safe_limit:]
 
 
+@app.get("/api/v1/issues")
+def list_correlated_issues() -> list[dict]:
+    return [
+        {
+            "event_type": issue.event_type,
+            "latitude": issue.latitude,
+            "longitude": issue.longitude,
+            "first_seen": issue.first_seen,
+            "last_seen": issue.last_seen,
+            "sightings": issue.sightings,
+            "confidence": round(issue.confidence, 4),
+            "source_events": issue.source_events,
+        }
+        for issue in CORRELATOR.issues
+    ]
+
+
 @app.get("/api/v1/stats")
 def stats() -> dict:
     counts: dict[str, int] = {}
+    buses = set()
     for event in EVENTS:
         counts[event.event_type] = counts.get(event.event_type, 0) + 1
-    return {"total_events": len(EVENTS), "by_type": counts}
+        buses.add(event.bus_id)
+    return {
+        "total_events": len(EVENTS),
+        "correlated_issues": len(CORRELATOR.issues),
+        "active_bus_ids": sorted(buses),
+        "by_type": counts,
+    }
