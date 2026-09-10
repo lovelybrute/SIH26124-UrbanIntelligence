@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .ambulance import build_priority_alert
+from .config import settings
 from .correlation import EventCorrelator
 from .evidence import EVIDENCE_DIR, save_evidence
 from .geojson import events_to_feature_collection, issues_to_feature_collection
@@ -18,15 +19,15 @@ from .workflow import AuthorityWorkflow, WorkflowStatus
 app = FastAPI(
     title="SIH26124 Urban Intelligence API",
     description="Central event-ingestion and decision-support API for AI-enabled public transport sensing nodes.",
-    version="0.6.0",
+    version="0.7.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(settings.cors_origins),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 app.mount("/evidence", StaticFiles(directory=str(EVIDENCE_DIR)), name="evidence")
 
@@ -84,6 +85,12 @@ class AmbulanceRequest(BaseModel):
     avg_speed_kmh: float = Field(default=35.0, gt=0)
 
 
+def require_write_key(x_api_key: Annotated[str | None, Header()] = None) -> None:
+    if settings.api_write_key and x_api_key != settings.api_write_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API write key")
+
+
+WRITE_GUARD = Depends(require_write_key)
 EVENTS: list[UrbanEvent] = []
 CORRELATOR = EventCorrelator(radius_m=25.0)
 WORKFLOW = AuthorityWorkflow()
@@ -123,6 +130,7 @@ def health() -> dict:
         "status": "online",
         "service": "central-event-api",
         "version": app.version,
+        "environment": settings.environment,
         "loaded_events": len(EVENTS),
         "persisted_events": persisted_count(),
         "correlated_issues": len(CORRELATOR.issues),
@@ -130,15 +138,34 @@ def health() -> dict:
     }
 
 
-@app.post("/api/v1/evidence", status_code=201)
+@app.get("/health/live")
+def liveness() -> dict:
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def readiness() -> dict:
+    try:
+        count = persisted_count()
+        EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+        writable = EVIDENCE_DIR.exists() and EVIDENCE_DIR.is_dir()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Storage unavailable: {exc}") from exc
+    if not writable:
+        raise HTTPException(status_code=503, detail="Evidence storage unavailable")
+    return {"status": "ready", "persisted_events": count, "evidence_storage": "ready"}
+
+
+@app.post("/api/v1/evidence", status_code=201, dependencies=[WRITE_GUARD])
 async def upload_evidence(file: UploadFile = File(...)) -> dict:
     try:
         return await save_evidence(file)
     except ValueError as exc:
-        raise HTTPException(status_code=413, detail=str(exc)) from exc
+        status = 415 if "Unsupported" in str(exc) else 413
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/events", response_model=UrbanEvent, status_code=201)
+@app.post("/api/v1/events", response_model=UrbanEvent, status_code=201, dependencies=[WRITE_GUARD])
 def ingest_event(payload: UrbanEventIn) -> UrbanEvent:
     event = UrbanEvent(
         **payload.model_dump(),
@@ -196,7 +223,7 @@ def urban_health() -> dict:
     return summarize_city(EVENTS, CORRELATOR.issues)
 
 
-@app.post("/api/v1/authority/work-items", status_code=201)
+@app.post("/api/v1/authority/work-items", status_code=201, dependencies=[WRITE_GUARD])
 def create_work_item(payload: WorkflowCreate) -> dict:
     return WORKFLOW.create(**payload.model_dump()).to_dict()
 
@@ -206,7 +233,7 @@ def list_work_items() -> list[dict]:
     return WORKFLOW.list()
 
 
-@app.patch("/api/v1/authority/work-items/{item_id}")
+@app.patch("/api/v1/authority/work-items/{item_id}", dependencies=[WRITE_GUARD])
 def update_work_item(item_id: str, payload: WorkflowUpdate) -> dict:
     try:
         return WORKFLOW.update(item_id, **payload.model_dump()).to_dict()
@@ -214,7 +241,7 @@ def update_work_item(item_id: str, payload: WorkflowUpdate) -> dict:
         raise HTTPException(status_code=404, detail="Work item not found") from exc
 
 
-@app.post("/api/v1/ambulance/priority")
+@app.post("/api/v1/ambulance/priority", dependencies=[WRITE_GUARD])
 def ambulance_priority(payload: AmbulanceRequest) -> dict:
     return build_priority_alert(**payload.model_dump()).to_dict()
 
