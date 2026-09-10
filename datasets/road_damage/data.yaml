@@ -1,11 +1,11 @@
-# Update these paths after placing the YOLO-format dataset in this directory.
-path: .
+# Prepared by scripts/prepare_rdd2022.py from the official RDD2022 dataset.
+path: processed
 train: images/train
 val: images/val
 test: images/test
 
 names:
-  0: pothole
-  1: crack
-  2: damaged_road
-  3: waterlogging
+  0: longitudinal_crack
+  1: transverse_crack
+  2: alligator_crack
+  3: pothole
