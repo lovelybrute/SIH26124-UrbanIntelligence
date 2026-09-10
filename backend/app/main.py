@@ -2,12 +2,14 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .ambulance import build_priority_alert
 from .correlation import EventCorrelator
+from .evidence import EVIDENCE_DIR, save_evidence
 from .geojson import events_to_feature_collection, issues_to_feature_collection
 from .storage import init_db, persisted_count, recent_events, save_event
 from .urban_health import summarize_city
@@ -16,7 +18,7 @@ from .workflow import AuthorityWorkflow, WorkflowStatus
 app = FastAPI(
     title="SIH26124 Urban Intelligence API",
     description="Central event-ingestion and decision-support API for AI-enabled public transport sensing nodes.",
-    version="0.5.0",
+    version="0.6.0",
 )
 
 app.add_middleware(
@@ -26,6 +28,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount("/evidence", StaticFiles(directory=str(EVIDENCE_DIR)), name="evidence")
 
 EventType = Literal[
     "pothole", "road_damage", "waterlogging", "road_infrastructure",
@@ -125,6 +128,14 @@ def health() -> dict:
         "correlated_issues": len(CORRELATOR.issues),
         "authority_work_items": len(WORKFLOW.items),
     }
+
+
+@app.post("/api/v1/evidence", status_code=201)
+async def upload_evidence(file: UploadFile = File(...)) -> dict:
+    try:
+        return await save_evidence(file)
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/events", response_model=UrbanEvent, status_code=201)
