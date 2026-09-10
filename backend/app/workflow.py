@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 
+from .workflow_storage import load_work_items, save_work_item
+
 WorkflowStatus = Literal["detected", "verified", "assigned", "in_progress", "resolved", "rejected"]
 
 
@@ -25,10 +27,20 @@ class WorkItem:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, payload: dict) -> "WorkItem":
+        return cls(**payload)
+
 
 class AuthorityWorkflow:
     def __init__(self) -> None:
         self.items: dict[str, WorkItem] = {}
+        for payload in load_work_items():
+            try:
+                item = WorkItem.from_dict(payload)
+                self.items[item.id] = item
+            except (TypeError, ValueError):
+                continue
 
     def create(self, event_type: str, latitude: float, longitude: float, severity: int, confidence: float) -> WorkItem:
         item = WorkItem(
@@ -40,6 +52,7 @@ class AuthorityWorkflow:
             confidence=confidence,
         )
         self.items[item.id] = item
+        save_work_item(item)
         return item
 
     def update(self, item_id: str, status: WorkflowStatus, assignee: str | None = None, note: str | None = None) -> WorkItem:
@@ -50,6 +63,7 @@ class AuthorityWorkflow:
         if note:
             item.notes.append(note)
         item.updated_at = datetime.now(timezone.utc).isoformat()
+        save_work_item(item)
         return item
 
     def list(self) -> list[dict]:
