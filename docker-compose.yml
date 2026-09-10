@@ -8,7 +8,9 @@ services:
     volumes:
       - urban_data:/app/data
     environment:
-      - PYTHONUNBUFFERED=1
+      PYTHONUNBUFFERED: "1"
+      URBAN_DB_PATH: /app/data/urban_intelligence.db
+      EVIDENCE_DIR: /app/data/evidence
 
   frontend:
     build:
