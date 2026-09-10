@@ -16,7 +16,7 @@ from .workflow import AuthorityWorkflow, WorkflowStatus
 app = FastAPI(
     title="SIH26124 Urban Intelligence API",
     description="Central event-ingestion and decision-support API for AI-enabled public transport sensing nodes.",
-    version="0.4.0",
+    version="0.5.0",
 )
 
 app.add_middleware(
@@ -86,6 +86,32 @@ CORRELATOR = EventCorrelator(radius_m=25.0)
 WORKFLOW = AuthorityWorkflow()
 init_db()
 
+for persisted in reversed(recent_events(1000)):
+    try:
+        restored = UrbanEvent.model_validate(persisted)
+        EVENTS.append(restored)
+        CORRELATOR.observe(restored)
+    except Exception:
+        continue
+
+
+def maybe_create_authority_job(event: UrbanEvent) -> None:
+    urgent_types = {"vehicle_incident", "pedestrian_risk", "waterlogging", "pothole", "road_damage"}
+    if event.event_type not in urgent_types:
+        return
+    if event.severity < 4 and event.event_type != "vehicle_incident":
+        return
+    for item in WORKFLOW.items.values():
+        if item.event_type == event.event_type and abs(item.latitude - event.location.latitude) < 0.0002 and abs(item.longitude - event.location.longitude) < 0.0002 and item.status not in {"resolved", "rejected"}:
+            return
+    WORKFLOW.create(
+        event_type=event.event_type,
+        latitude=event.location.latitude,
+        longitude=event.location.longitude,
+        severity=event.severity,
+        confidence=event.confidence,
+    )
+
 
 @app.get("/")
 def health() -> dict:
@@ -94,7 +120,7 @@ def health() -> dict:
         "status": "online",
         "service": "central-event-api",
         "version": app.version,
-        "events_received_this_process": len(EVENTS),
+        "loaded_events": len(EVENTS),
         "persisted_events": persisted_count(),
         "correlated_issues": len(CORRELATOR.issues),
         "authority_work_items": len(WORKFLOW.items),
@@ -111,6 +137,7 @@ def ingest_event(payload: UrbanEventIn) -> UrbanEvent:
     EVENTS.append(event)
     CORRELATOR.observe(event)
     save_event(event)
+    maybe_create_authority_job(event)
     return event
 
 
